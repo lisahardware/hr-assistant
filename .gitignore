@@ -1,0 +1,7 @@
+docker/.env
+.env
+venv/
+hr_vector_store/
+output/
+__pycache__/
+.claude/

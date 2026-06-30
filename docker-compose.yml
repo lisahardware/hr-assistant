@@ -1,0 +1,50 @@
+services:
+
+  hr-mcp:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: hr-mcp
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./docker/.env
+    volumes:
+      - ms365-tokens:/root/.config/ms365-mcp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  hr-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hr-app
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Reach the MCP sidecar by service name, not localhost
+      - MCP_SERVER_URL=http://hr-mcp:3000
+      # If MODEL_PROVIDER=ollama, point at Ollama on the host machine
+      - OLLAMA_HOST=http://host.docker.internal:11434
+    volumes:
+      # Persist generated documents and ChromaDB data across restarts
+      - ./output:/app/output
+      - ./templates:/app/templates
+      - ./business_config.json:/app/business_config.json
+      - chroma-data:/app/chroma_db
+    depends_on:
+      hr-mcp:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ms365-tokens:
+  chroma-data:
