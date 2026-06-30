@@ -17,7 +17,6 @@ Prerequisites:
 
 import os
 from datetime import datetime
-# from flask import Flask, request, jsonify, render_template_string, send_file
 from flask import Flask, request, jsonify, send_file, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
