@@ -236,6 +236,33 @@ UI_HTML = """
             color: #991b1b;
             margin-bottom: 12px;
         }
+        .compliance-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 10px 16px;
+            margin-bottom: 16px;
+            font-size: 12.5px;
+            color: #6b7280;
+        }
+        .compliance-bar .label { display: flex; align-items: center; gap: 6px; }
+        .compliance-bar .stale { color: #b45309; font-weight: 600; }
+        #refresh-compliance-btn {
+            font-size: 12px;
+            font-weight: 500;
+            padding: 6px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid #d1d5db;
+            background: white;
+            color: #1a1a2e;
+            transition: all 0.2s;
+        }
+        #refresh-compliance-btn:hover { border-color: #1a1a2e; }
+        #refresh-compliance-btn:disabled { opacity: 0.6; cursor: not-allowed; }
     </style>
 </head>
 <body>
@@ -252,6 +279,11 @@ UI_HTML = """
 </header>
 
 <div class="container">
+    <div class="compliance-bar">
+        <span class="label">📋 Compliance sources: <span id="compliance-last-refreshed">Checking...</span></span>
+        <button id="refresh-compliance-btn" onclick="refreshCompliance()">Refresh Now</button>
+    </div>
+
     <div class="quick-actions">
         <button class="quick-btn" onclick="fillPrompt('Draft an offer letter for a software engineer named Alex Johnson, salary $95,000, starting February 1, based in Maryland.')">
             <span class="icon">📄</span>Offer Letter
@@ -311,6 +343,57 @@ UI_HTML = """
     function fillPrompt(text) {
         document.getElementById('user-input').value = text;
         document.getElementById('user-input').focus();
+    }
+
+    async function loadComplianceStatus() {
+        const el = document.getElementById('compliance-last-refreshed');
+        try {
+            const res = await fetch('/api/compliance-status');
+            const data = await res.json();
+            if (!data.success) {
+                el.textContent = 'Status unavailable';
+                return;
+            }
+            if (!data.last_refreshed) {
+                el.innerHTML = '<span class="stale">Never refreshed</span> — click Refresh Now before first use';
+                return;
+            }
+            // Flag as stale if it's been more than 30 days since last refresh,
+            // since compliance_refresh.py's own docstring recommends a
+            // weekly cadence — 30 days is a generous outer bound before
+            // calling it out, not a hard requirement.
+            const last = new Date(data.last_refreshed);
+            const daysSince = Math.floor((Date.now() - last.getTime()) / 86400000);
+            if (daysSince > 30) {
+                el.innerHTML = `<span class="stale">Last refreshed ${data.last_refreshed} (${daysSince} days ago)</span>`;
+            } else {
+                el.textContent = `Last refreshed ${data.last_refreshed} (${daysSince} day${daysSince === 1 ? '' : 's'} ago)`;
+            }
+        } catch {
+            el.textContent = 'Status unavailable';
+        }
+    }
+
+    async function refreshCompliance() {
+        const btn = document.getElementById('refresh-compliance-btn');
+        const el = document.getElementById('compliance-last-refreshed');
+        btn.disabled = true;
+        btn.textContent = 'Refreshing...';
+        el.innerHTML = '<span class="spinner"></span>Fetching latest compliance sources — this can take a minute...';
+        try {
+            const res = await fetch('/api/compliance-refresh', { method: 'POST' });
+            const data = await res.json();
+            if (data.success) {
+                await loadComplianceStatus();
+            } else {
+                el.textContent = `Refresh failed: ${data.error || 'unknown error'}`;
+            }
+        } catch (err) {
+            el.textContent = `Refresh failed: ${err.message}`;
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Refresh Now';
+        }
     }
 
     async function submitRequest() {
@@ -431,6 +514,7 @@ UI_HTML = """
 
     document.addEventListener('DOMContentLoaded', () => {
         checkStatus();
+        loadComplianceStatus();
         document.getElementById('user-input').addEventListener('keydown', e => {
             if (e.key === 'Enter' && e.ctrlKey) submitRequest();
         });
@@ -518,6 +602,41 @@ def index_templates():
         return jsonify({"success": False, "error": str(e)})
 
 
+@app.route("/api/compliance-status")
+def compliance_status():
+    try:
+        store = VectorStore()
+        last_refreshed = store.get_compliance_last_refreshed()
+        return jsonify({
+            "success": True,
+            "last_refreshed": last_refreshed,  # ISO date string, e.g. "2026-06-30", or null if never run
+            "chunk_count": store.compliance.count()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/compliance-refresh", methods=["POST"])
+def compliance_refresh_endpoint():
+    """
+    Trigger a compliance source refresh on demand from the UI. This makes
+    real outbound network calls (eCFR, IRS, MD/VA/DC sources) and can take
+    a minute or more, so the frontend should show a loading state and
+    expect this request to be slow rather than instant.
+    """
+    try:
+        from tools.compliance_refresh import refresh_all
+        store = VectorStore()
+        results = refresh_all(store)
+        return jsonify({
+            "success": True,
+            "results": results,
+            "last_refreshed": store.get_compliance_last_refreshed()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
 # ─────────────────────────────────────────────
 # Startup
 # ─────────────────────────────────────────────
@@ -538,6 +657,31 @@ if __name__ == "__main__":
             print(f"Indexed: {results}")
         else:
             print(f"Vector store ready ({store.templates.count()} template chunks)")
+
+        # One-time compliance refresh: only runs if the compliance
+        # collection is genuinely empty (first run, or a fresh chroma-data
+        # volume) — never on subsequent restarts, so the agent stays
+        # air-gapped during normal operation per compliance_refresh.py's
+        # own design intent. This makes real outbound network calls to
+        # eCFR, IRS, and the MD/VA/DC sources, so it requires the
+        # container to have egress enabled; a network failure here is
+        # caught and logged as a warning rather than blocking startup,
+        # since compliance grounding degrading gracefully (empty results
+        # rather than a crash) is preferable to the whole app failing to
+        # start over a transient network issue.
+        if store.compliance.count() == 0:
+            print("No compliance sources indexed yet — running first-time refresh "
+                  "(this makes outbound network calls and may take a minute)...")
+            try:
+                from tools.compliance_refresh import refresh_all
+                refresh_results = refresh_all(store)
+                print(f"Initial compliance refresh complete: {refresh_results}")
+            except Exception as e:
+                print(f"Warning: Initial compliance refresh failed: {e}")
+                print("  The app will still start, but compliance grounding will be "
+                      "empty until you run: python -m tools.compliance_refresh --all")
+        else:
+            print(f"Compliance sources ready ({store.compliance.count()} chunks indexed)")
     except Exception as e:
         print(f"Warning: Could not initialize vector store: {e}")
 

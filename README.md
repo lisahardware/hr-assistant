@@ -9,6 +9,7 @@ An AI-powered HR assistant for small businesses. Describe what you need in plain
 - **Document generation** — produces filled `.docx` files from structured templates
 - **Tree-of-Thought drafting** — generates 3 candidate drafts per request and scores them, picking the best one
 - **Compliance-aware** — retrieval agent pulls relevant labor law context before drafting
+- **Compliance refresh** — UI status bar shows when compliance sources were last indexed; "Refresh Now" button fetches the latest MD/DC/VA labor law references on demand. Sources are also auto-indexed on first startup if the collection is empty (makes outbound network calls; takes ~1 minute).
 - **Owner review gates** — documents containing compensation or legal terms are always flagged before you can send them
 - **Microsoft 365 integration** — save documents to OneDrive, send emails via Outlook, schedule interviews in Calendar (requires M365 account)
 - **Local or API model** — runs fully offline with Ollama/Mistral, or against the Anthropic API

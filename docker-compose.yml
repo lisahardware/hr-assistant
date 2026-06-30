@@ -29,17 +29,37 @@ services:
     env_file:
       - .env
     environment:
+      # Ensures print() output appears in `docker compose logs` in real
+      # time, including from inside Flask request handlers — without
+      # this, Python's stdout buffering can hold output (e.g. from a
+      # long-running route like /api/compliance-refresh) until the
+      # buffer fills or the process exits, making working code look
+      # like it produced no output or silently failed.
       - PYTHONUNBUFFERED=1
       # Reach the MCP sidecar by service name, not localhost
       - MCP_SERVER_URL=http://hr-mcp:3000
       # If MODEL_PROVIDER=ollama, point at Ollama on the host machine
       - OLLAMA_HOST=http://host.docker.internal:11434
+      # Must match the volume mount target below (chroma-data:/app/chroma_db)
+      # — without this, VectorStore's relative-path default writes to a
+      # non-persisted location inside the container instead of the
+      # named volume.
+      - CHROMA_PERSIST_PATH=/app/chroma_db
     volumes:
       # Persist generated documents and ChromaDB data across restarts
       - ./output:/app/output
       - ./templates:/app/templates
-      - ./business_config.json:/app/business_config.json
       - chroma-data:/app/chroma_db
+      # Persist the embedding model download (~83MB) so it survives
+      # container rebuilds, not just restarts. Without this, every fresh
+      # --build creates a container with no cached model, and the FIRST
+      # vector store .add() call anywhere — template indexing, compliance
+      # refresh, a retrieval call — pauses for several seconds to
+      # re-download it inline, which is long enough to make that specific
+      # request look stalled or partially-failed (this is what caused the
+      # "Refresh Now" button to appear to only refresh MD's federal
+      # sources before silently stopping).
+      - chroma-model-cache:/root/.cache/chroma
     depends_on:
       hr-mcp:
         condition: service_healthy
@@ -48,3 +68,4 @@ services:
 volumes:
   ms365-tokens:
   chroma-data:
+  chroma-model-cache:
